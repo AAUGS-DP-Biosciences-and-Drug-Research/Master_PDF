@@ -135,9 +135,8 @@ def parse_readme(md: str):
     # Survival guide: first PDF link in top block
     survival = None
     for ln in top:
-        m = re.search(r"\[(.+?))\]\((https?://[^\s)]+\.pdf)\)", ln, re.I)
-        if not m:
-            m = re.search(r"\[(.+?)\]\((https?://[^\s)]+\.pdf)\)", ln, re.I)
+        # FIXED regex (no stray ')'): match any [text](https://...pdf)
+        m = re.search(r"\[([^\]]+)\]\((https?://[^\s)]+\.pdf)\)", ln, re.I)
         if m:
             survival = {"text": strip_md_inline(m.group(1)), "url": m.group(2)}
             break
@@ -252,10 +251,10 @@ def make_styled_index_pdf(cover: dict, toc_entries, pagesize=A4):
     """
     # CSS -> points: px ~ 0.75pt
     px = 0.75
-    margin = 30 * px               # 30px ≈ 22.5pt
-    title_mt = 60 * px             # margin-top: 60px
-    body_fs = 12.5                 # body font-size
-    lh = body_fs * 1.3             # line-height ~1.3
+    margin = 30 * px               # ≈ 22.5pt left/right margins
+    title_mt = 60 * px
+    body_fs = 12.5
+    lh = body_fs * 1.3
     h1_fs = 24
     h2_fs = 18
     link_color = HexColor("#0077cc")
@@ -265,7 +264,6 @@ def make_styled_index_pdf(cover: dict, toc_entries, pagesize=A4):
     c = canvas.Canvas(packet, pagesize=pagesize)
     W, H = pagesize
 
-    # Base styles
     c.setFillColor(text_color)
 
     y = H - title_mt
@@ -277,7 +275,7 @@ def make_styled_index_pdf(cover: dict, toc_entries, pagesize=A4):
     c.drawString((W - tw) / 2.0, y, title)
     y -= 20
 
-    # Intro (left-aligned like in your HTML body)
+    # Intro
     c.setFont("Helvetica", body_fs)
     for para in cover.get("intro") or []:
         for line in textwrap.wrap(para, width=90):
@@ -285,20 +283,17 @@ def make_styled_index_pdf(cover: dict, toc_entries, pagesize=A4):
             y -= lh
         y -= 4
 
-    # Major Subjects (section h2 with underline)
+    # Major Subjects
     majors = cover.get("majors") or []
     if majors:
         y -= 8
-        # h2
         c.setFont("Helvetica-Bold", h2_fs)
         c.drawString(margin, y, "Major Subjects in the Programme")
-        # underline
         y -= 6
         c.setLineWidth(1)
         c.setStrokeColor(HexColor("#cccccc"))
         c.line(margin, y, W - margin, y)
         y -= 10
-        # list
         c.setFont("Helvetica", body_fs)
         for m in majors:
             c.drawString(margin + 14, y, f"• {m}")
@@ -310,17 +305,14 @@ def make_styled_index_pdf(cover: dict, toc_entries, pagesize=A4):
         y -= 6
         label = f"Helpful: {surv['text']}"
         c.setFont("Helvetica", body_fs)
-        # link-colored text
         c.setFillColor(link_color)
         c.drawString(margin, y, label)
-        # click area on text
         tw = c.stringWidth(label, "Helvetica", body_fs)
         c.linkURL(surv["url"], (margin, y-2, margin+tw, y+12), relative=0)
-        # reset color
         c.setFillColor(text_color)
         y -= lh
 
-    # INDEX header (h2 with underline)
+    # INDEX header
     y -= 4
     c.setFont("Helvetica-Bold", h2_fs)
     c.drawString(margin, y, "Index")
@@ -330,22 +322,17 @@ def make_styled_index_pdf(cover: dict, toc_entries, pagesize=A4):
     c.line(margin, y, W - margin, y)
     y -= 10
 
-    # Index entries (title …… page)
+    # Entries
     c.setFont("Helvetica", body_fs)
-    link_rects = []  # (rect, target_abs_index)
+    link_rects = []
     for title, body_start, abs_start in toc_entries:
-        # one-line, truncated if needed
         line = textwrap.shorten(title, width=90, placeholder="…")
-        # text
         c.drawString(margin, y, line)
-        # page number right-aligned
-        page_str = f"{body_start}"
-        c.drawRightString(W - margin, y, page_str)
-        # clickable area across the row
+        c.drawRightString(W - margin, y, f"{body_start}")
         rect = (margin, y-2, W - margin, y+12)
-        link_rects.append((rect, abs_start - 1))  # zero-based target page
+        link_rects.append((rect, abs_start - 1))
         y -= lh
-        if y < (margin + 36):  # keep a bottom margin
+        if y < (margin + 36):
             break
 
     # Footer
@@ -360,12 +347,6 @@ def make_styled_index_pdf(cover: dict, toc_entries, pagesize=A4):
 
 # ---- Assembly ---------------------------------------------------------------
 def build_master(cover: dict, items: list[dict]):
-    """
-    Build master.pdf with:
-      - Styled Index page (page 1; unnumbered)
-      - Body: merged PDFs in README order, with bookmarks; body pages start at 1
-    Returns: page_map for README.
-    """
     # 1) Fetch sources + counts
     cache = []
     counts = []
@@ -380,11 +361,11 @@ def build_master(cover: dict, items: list[dict]):
         cache.append((it, dest))
         counts.append(count)
 
-    # 2) Page mapping
-    ABS_OFFSET = 1  # Index page only before body
+    # 2) Page mapping (Index page before body)
+    ABS_OFFSET = 1
     page_map = []
     body_cursor = 1
-    abs_cursor = ABS_OFFSET + 1  # first body page's absolute index
+    abs_cursor = ABS_OFFSET + 1
     for (it, _), count in zip(cache, counts):
         start_body = body_cursor
         end_body = body_cursor + count - 1
@@ -398,20 +379,20 @@ def build_master(cover: dict, items: list[dict]):
         body_cursor += count
         abs_cursor += count
 
-    # 3) Build Index page (styled)
+    # 3) Build Index page
     toc_entries = [(ent["title"], ent["start_body"], ent["start_abs"]) for ent in page_map]
     index_pdf, index_link_rects = make_styled_index_pdf(cover, toc_entries, pagesize=A4)
 
     # 4) Assemble final PDF
     writer = PdfWriter()
 
-    # Index page (bookmark)
+    # Index page + bookmark
     writer.add_page(index_pdf.pages[0])
     add_bookmark(writer, "Index", 0)
 
     # Body with bookmarks + footer numbering
     sections_parent = add_bookmark(writer, "Sections", 1)
-    abs_page_index = 1  # zero-based: body starts at page 2
+    abs_page_index = 1  # body starts at page 2 (zero-based)
 
     for (it, src_path), meta in zip(cache, page_map):
         start_idx = abs_page_index
@@ -427,8 +408,8 @@ def build_master(cover: dict, items: list[dict]):
             abs_page_index += 1
             body_page_num += 1
 
-    # 5) Make index rows clickable (best effort)
-    from_page = 0  # index page
+    # 5) Make index rows clickable
+    from_page = 0
     for rect, target_idx in index_link_rects:
         add_internal_link(writer, from_page, target_idx, rect)
 
