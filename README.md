@@ -1,7 +1,5 @@
 # Doctoral Programme in Biosciences and Drug Research
 
-### Welcome to the Doctoral Programme in Biosciences and Drug Research at **Åbo Akademi University**.
-
 This document contains some useful information about our doctoral program.
 
 If you are new to Finland or Turku, you may find this helpful:  
