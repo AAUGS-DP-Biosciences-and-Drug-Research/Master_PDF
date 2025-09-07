@@ -23,8 +23,6 @@ If you are new to Finland or Turku, you may find this helpful:
 ### Supervisor Portfolio  
 - 📄 [Download PDF](https://aaugs-dp-biosciences-and-drug-research.github.io/supervisor-portfolio/Supervisor_Portfolio.pdf)
 
-
-
 ---
 
 <!-- BEGIN MASTER INDEX -->
