@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Master PDF builder with HTML-like index styling:
+Build master.pdf from README.md with a styled first-page Index:
 
-- Index is page 1 (styled like your HTML: 30px margins, 24/18/12.5 fonts, 1.3 line-height, underlined h2)
-- Index entries wrap by measured widths, page number on the LAST line, full-row click area
-- Index can span multiple pages
-- Body = merged PDFs in README order; body pages numbered 1..N (index pages unnumbered)
+- Index page (page 1) styled like your HTML:
+  * 30px margins, Arial/Helvetica-like sizing: 24 (H1), 18 (H2), 12.5 (body)
+  * line-height ~1.3, underlined H2s
+  * H1 wraps INSIDE the content box and is centered line-by-line
+  * extra spacing under the title and before the "Index" header
+- Index entries wrap, page number is on the LAST line, full entry row is clickable
+- Index can span multiple pages (entries never split across pages)
+- Body: merged PDFs in README order; body pages numbered 1..N (index pages unnumbered)
 - Bookmarks for Index + each section
 - README auto-updated with a page map
 
@@ -23,7 +27,6 @@ from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import inch
 from reportlab.lib.colors import black, HexColor
 
 # ---- PyPDF2 (>=3.x) ---------------------------------------------------------
@@ -49,7 +52,7 @@ README = ROOT / "README.md"
 PDF_DIR = ROOT / "pdfs"
 CACHE = ROOT / ".cache"
 MASTER = PDF_DIR / "master.pdf"
-FONTS_DIR = ROOT / "fonts"  # optional: put Arial.ttf / DejaVuSans.ttf here
+FONTS_DIR = ROOT / "fonts"  # optional: drop TTFs here
 
 BEGIN_MARK = "<!-- BEGIN MASTER INDEX -->"
 END_MARK   = "<!-- END MASTER INDEX -->"
@@ -60,24 +63,27 @@ CACHE.mkdir(parents=True, exist_ok=True)
 # CSS-like metrics (convert px→pt at ~0.75)
 PX = 0.75
 MARGIN_PT = 30 * PX        # ≈22.5pt margins
-TOP_FIRST_PT = 60 * PX     # ≈45pt first page top
-TOP_NEXT_PT  = 30 * PX     # ≈22.5pt subsequent index pages
+TOP_FIRST_PT = 60 * PX     # ≈45pt top margin on first index page
+TOP_NEXT_PT  = 30 * PX     # ≈22.5pt on subsequent index pages
 BODY_FS = 12.5
 H1_FS = 24
 H2_FS = 18
 LEADING = BODY_FS * 1.3
+H1_LEADING = H1_FS * 1.2
+TITLE_MB_PT = 40 * PX      # ≈30pt space under title
+INDEX_TOP_EXTRA_PT = 16 * PX
 LINK_COLOR = HexColor("#0077cc")
 TEXT_COLOR = HexColor("#222222")
 
-# Fonts: we try to register a real sans font; fallback to Helvetica
+# Fonts: auto-register DejaVu/Arial if provided; fallback to Helvetica
 FONT_REGULAR = "Helvetica"
 FONT_BOLD = "Helvetica-Bold"
 
 def _register_fonts():
     global FONT_REGULAR, FONT_BOLD
     candidates = [
-        ("Arial", "Arial.ttf", "Arial Bold", "Arial-Bold.ttf"),
         ("DejaVuSans", "DejaVuSans.ttf", "DejaVuSans-Bold", "DejaVuSans-Bold.ttf"),
+        ("Arial", "Arial.ttf", "Arial-Bold", "Arial-Bold.ttf"),
         ("LiberationSans", "LiberationSans-Regular.ttf", "LiberationSans-Bold", "LiberationSans-Bold.ttf"),
     ]
     for fam, regular, boldfam, bold in candidates:
@@ -115,7 +121,7 @@ def write_file(p: Path, s: str) -> None:
     p.write_text(s, encoding="utf-8")
 
 def wrap_by_width(c: canvas.Canvas, text: str, font: str, size: float, max_width: float):
-    """Word-wrap by measured widths; returns list[str] lines (never empty for non-empty text)."""
+    """Word-wrap by measured widths; returns list[str] lines (at least [''] for empty)."""
     words = text.split()
     if not words:
         return [""]
@@ -127,8 +133,8 @@ def wrap_by_width(c: canvas.Canvas, text: str, font: str, size: float, max_width
         else:
             if line:
                 lines.append(line)
-            # very long token: hard-break
             if c.stringWidth(w, font, size) > max_width:
+                # hard-break very long token
                 buf = ""
                 for ch in w:
                     if c.stringWidth(buf + ch, font, size) <= max_width:
@@ -145,10 +151,20 @@ def wrap_by_width(c: canvas.Canvas, text: str, font: str, size: float, max_width
 
 # ----------------------------- README parsing --------------------------------
 def parse_readme(md: str):
-    """Extract cover/top info and section list (title + PDF url)."""
+    """
+    Extracts:
+      cover: {
+        'title': H1,
+        'subheads': [h3 text inside the intro block],
+        'intro': [paragraph lines in intro block],
+        'survival': {'text','url'} | None
+      }
+      items: [{'title','url'}] (in the same order as README)
+    The "intro block" is everything from the start until the first '---' line.
+    """
     lines = md.splitlines()
 
-    # Title
+    # Find first H1 as title
     title = None
     for ln in lines:
         m = re.match(r"^\s*#\s+(.*)", ln)
@@ -156,66 +172,80 @@ def parse_readme(md: str):
             title = strip_md_inline(m.group(1).strip())
             break
 
-    # Top block until first ### or master markers
-    top = []
+    # Intro block: from start until first horizontal rule '---'
+    intro_block = []
+    hr_found = False
     for ln in lines:
-        if ln.strip() == BEGIN_MARK:
+        if ln.strip().startswith('---'):
+            hr_found = True
             break
-        if re.match(r"^\s*###\s+", ln):
-            break
-        top.append(ln)
+        intro_block.append(ln)
 
-    # Intro after H1 until '---'
-    intro_lines, seen_h1 = [], False
-    for ln in top:
-        if not seen_h1:
-            if re.match(r"^\s*#\s+", ln):
-                seen_h1 = True
+    # Collect h3 subheads and paragraph-ish lines inside intro block
+    subheads = []
+    intro_paras = []
+    for ln in intro_block:
+        h3 = re.match(r"^\s*###\s+(.*)$", ln)
+        if h3:
+            subheads.append(strip_md_inline(h3.group(1).strip()))
             continue
-        if ln.strip().startswith("---"):
-            break
-        intro_lines.append(ln)
-    intro_text = strip_md_inline("\n".join(intro_lines).strip())
-    intro = [ln for ln in intro_text.splitlines() if ln.strip()]
-
-    # Majors between '## Major Subjects' and next '---'
-    majors, capture = [], False
-    for ln in top:
-        if re.match(r"^\s*##\s+Major Subjects", ln):
-            capture = True
+        # ignore H1 itself
+        if re.match(r"^\s*#\s+", ln):
             continue
-        if capture:
-            if ln.strip().startswith("---"):
-                break
-            m = re.match(r"^\s*-\s+(.*)", ln)
-            if m:
-                majors.append(strip_md_inline(m.group(1).strip()))
+        # ignore empty lines and bullet-only top lists (not used in your README now)
+        if ln.strip().startswith(("-", "*")):
+            continue
+        if ln.strip() == "":
+            intro_paras.append("")  # preserve paragraph breaks
+        else:
+            # keep original lines; we'll wrap later
+            intro_paras.append(strip_md_inline(ln))
 
-    # Survival guide: first PDF link in top block
+    # Collapse multiple empties but keep paragraph separation
+    # (simple normalize: split on blanks to paras)
+    paras = []
+    buf = []
+    for ln in intro_paras:
+        if ln == "":
+            if buf:
+                paras.append(" ".join(buf).strip())
+                buf = []
+        else:
+            buf.append(ln)
+    if buf:
+        paras.append(" ".join(buf).strip())
+
+    # Survival guide: first PDF link anywhere in the intro block
     survival = None
-    for ln in top:
+    for ln in intro_block:
         m = re.search(r"\[([^\]]+)\]\((https?://[^\s)]+\.pdf)\)", ln, re.I)
         if m:
             survival = {"text": strip_md_inline(m.group(1)), "url": m.group(2)}
             break
 
-    # Sections: ### heading + Download PDF link
-    items, current_h3 = [], None
-    for ln in lines:
-        if ln.strip() == BEGIN_MARK:
-            break
+    # Section items AFTER the first '---'
+    items = []
+    if hr_found:
+        after = lines[lines.index('---')+1 if '---' in lines else len(lines):]
+    else:
+        after = lines
+
+    current_h3 = None
+    for ln in after:
+        # new section header
         h = re.match(r"^\s*###\s+(.*)\s*$", ln)
         if h:
             current_h3 = strip_md_inline(h.group(1).strip())
             continue
+        # download link
         m = re.search(r"\[.*?Download PDF.*?\]\((https?://[^)]+?\.pdf)\)", ln, re.I)
         if m and current_h3:
             items.append({"title": current_h3, "url": m.group(1).strip()})
 
     cover = {
         "title": title or "Programme",
-        "intro": intro,
-        "majors": majors,
+        "subheads": subheads,   # e.g., ["Welcome to the Doctoral Programme in ..."]
+        "intro": paras,         # the paragraph text (wrapped later)
         "survival": survival,
     }
     return cover, items
@@ -294,8 +324,8 @@ def add_internal_link(writer: PdfWriter, from_page: int, to_page: int, rect):
     except Exception:
         pass
 
-# ----------------------------- styled Index (multi-page, safe wrapping) -----
-def draw_h2(c, W, y, text):
+# ----------------------------- styled Index (multi-page, safe) ---------------
+def draw_h2_with_rule(c, W, y, text):
     c.setFont(FONT_BOLD, H2_FS)
     c.drawString(MARGIN_PT, y, text)
     y -= 6
@@ -306,39 +336,55 @@ def draw_h2(c, W, y, text):
 
 def make_index_pages(cover: dict, body_entries, pagesize=A4):
     """
-    Create the Index PDF. Returns (PdfReader, link_rects)
-    where link_rects: list of (from_page_idx, rect, target_abs_page_idx_later)
-    We don't know absolute body page indices yet; we'll store body_start and map later.
+    Create the Index PDF.
+    Returns (PdfReader, link_rects) where link_rects is [(from_page_idx, rect, body_start)]
     """
     packet = io.BytesIO()
     c = canvas.Canvas(packet, pagesize=pagesize)
     W, H = pagesize
-    max_w = W - 2 * MARGIN_PT
+    content_w = W - 2 * MARGIN_PT
+    max_w = content_w
+
+    current_page = 0
 
     def new_page(first=False):
         return H - (TOP_FIRST_PT if first else TOP_NEXT_PT)
 
     def ensure_space(y, needed):
+        nonlocal current_page
         if y - needed < MARGIN_PT:
             c.showPage()
+            current_page += 1
             return new_page(first=False)
         return y
 
-    link_rects = []  # (page_idx, rect, body_start)
-    page_idx = 0
+    link_rects = []
     y = new_page(first=True)
 
-    # Title (centered)
+    # ----- H1 TITLE (wrapped & centered within margins) -----
     c.setFillColor(TEXT_COLOR)
     c.setFont(FONT_BOLD, H1_FS)
     title = cover.get("title", "Programme")
-    tw = c.stringWidth(title, FONT_BOLD, H1_FS)
-    c.drawString((W - tw) / 2.0, y, title)
-    y -= 20
+    title_lines = wrap_by_width(c, title, FONT_BOLD, H1_FS, max_w)
+    y = ensure_space(y, H1_LEADING * len(title_lines) + TITLE_MB_PT)
+    for line in title_lines:
+        lw = c.stringWidth(line, FONT_BOLD, H1_FS)
+        x = MARGIN_PT + (content_w - lw) / 2.0
+        c.drawString(x, y, line)
+        y -= H1_LEADING
+    y -= TITLE_MB_PT  # breathing room under title
 
-    # Intro
+    # ----- OPTIONAL H3 SUBHEADS (rendered as H2 style) -----
+    subheads = cover.get("subheads") or []
+    for sh in subheads:
+        y = ensure_space(y, H2_FS + 16)
+        y = draw_h2_with_rule(c, W, y, sh)
+
+    # ----- INTRO PARAGRAPHS -----
     c.setFont(FONT_REGULAR, BODY_FS)
     for para in (cover.get("intro") or []):
+        if not para:
+            continue
         lines = wrap_by_width(c, para, FONT_REGULAR, BODY_FS, max_w)
         for line in lines:
             y = ensure_space(y, LEADING)
@@ -346,81 +392,53 @@ def make_index_pages(cover: dict, body_entries, pagesize=A4):
             y -= LEADING
         y -= 4
 
-    # Majors
-    majors = cover.get("majors") or []
-    if majors:
-        y = ensure_space(y, H2_FS + 16)
-        y = draw_h2(c, W, y, "Major Subjects in the Programme")
-        c.setFont(FONT_REGULAR, BODY_FS)
-        for m in majors:
-            prefix = "• "
-            indent = c.stringWidth(prefix, FONT_REGULAR, BODY_FS)
-            lines = wrap_by_width(c, m, FONT_REGULAR, BODY_FS, max_w - indent)
-            for i, line in enumerate(lines):
-                y = ensure_space(y, LEADING)
-                if i == 0:
-                    c.drawString(MARGIN_PT, y, prefix + line)
-                else:
-                    c.drawString(MARGIN_PT + indent, y, line)
-                y -= LEADING
-
-    # Survival guide link
+    # ----- SURVIVAL GUIDE LINK -----
     surv = cover.get("survival")
     if surv:
         label = f"Helpful: {surv['text']}"
-        label_w = c.stringWidth(label, FONT_REGULAR, BODY_FS)
+        lw = c.stringWidth(label, FONT_REGULAR, BODY_FS)
         y = ensure_space(y, LEADING)
         c.setFont(FONT_REGULAR, BODY_FS)
         c.setFillColor(LINK_COLOR)
         c.drawString(MARGIN_PT, y, label)
-        c.linkURL(surv["url"], (MARGIN_PT, y - 2, MARGIN_PT + label_w, y + 12), relative=0)
+        c.linkURL(surv["url"], (MARGIN_PT, y - 2, MARGIN_PT + lw, y + 12), relative=0)
         c.setFillColor(TEXT_COLOR)
         y -= LEADING
 
-    # Index header
+    # ----- EXTRA GAP BEFORE INDEX HEADER -----
+    y = ensure_space(y, INDEX_TOP_EXTRA_PT)
+    y -= INDEX_TOP_EXTRA_PT
+
+    # ----- INDEX HEADER -----
     y = ensure_space(y, H2_FS + 16)
-    y = draw_h2(c, W, y, "Index")
+    y = draw_h2_with_rule(c, W, y, "Index")
     c.setFont(FONT_REGULAR, BODY_FS)
 
-    # Entries: wrap by width, page # on last line, link covers all lines
+    # ----- INDEX ENTRIES (never split an entry across pages) -----
     for title, body_start in body_entries:
-        lines = wrap_by_width(c, title, FONT_REGULAR, BODY_FS, max_w - 48)  # leave room for page number box
-        rect_top = y
-        for i, line in enumerate(lines):
-            y = ensure_space(y, LEADING)
-            c.drawString(MARGIN_PT, y, line)
-            if i == len(lines) - 1:
-                # only on last line show the page number right-aligned
-                c.drawRightString(W - MARGIN_PT, y, f"{body_start}")
-            y -= LEADING
-        rect_bottom = y + LEADING  # top of last drawn line
-        rect = (MARGIN_PT, rect_bottom - 2, W - MARGIN_PT, rect_top + 12)
-        link_rects.append((page_idx, rect, body_start))
-        if y - LEADING < MARGIN_PT:
+        text_w = max_w - 48  # reserve right edge for page number
+        lines = wrap_by_width(c, title, FONT_REGULAR, BODY_FS, text_w)
+        required = LEADING * len(lines)
+        # move to next page if this entry doesn't fit here
+        if y - required < MARGIN_PT:
             c.showPage()
-            page_idx += 1
+            current_page += 1
             y = new_page(first=False)
             c.setFont(FONT_REGULAR, BODY_FS)
+        rect_top = y
+        for i, line in enumerate(lines):
+            c.drawString(MARGIN_PT, y, line)
+            if i == len(lines) - 1:
+                c.drawRightString(W - MARGIN_PT, y, f"{body_start}")
+            y -= LEADING
+        rect_bottom = y + LEADING
+        rect = (MARGIN_PT, rect_bottom - 2, W - MARGIN_PT, rect_top + 12)
+        link_rects.append((current_page, rect, body_start))
 
-    # Footer (optional tiny generator note on each index page)
-    # Skipped: margins already tight, and we aim to match your HTML look.
-
-    c.showPage()
+    # finalize (do NOT add an extra blank page)
     c.save()
     packet.seek(0)
     index_reader = PdfReader(packet)
-    # Adjust page_idx count (last showPage created an extra blank page):
-    # Remove trailing blank if exists
-    if len(index_reader.pages) > (page_idx + 1):
-        # remove last blank
-        writer_tmp = PdfWriter()
-        for i in range(page_idx + 1):  # keep only filled pages
-            writer_tmp.add_page(index_reader.pages[i])
-        buf2 = io.BytesIO()
-        writer_tmp.write(buf2)
-        buf2.seek(0)
-        index_reader = PdfReader(buf2)
-
     return index_reader, link_rects
 
 # ----------------------------- assembly --------------------------------------
@@ -438,7 +456,7 @@ def build_master(cover: dict, items: list[dict]):
         cache.append((it, dest))
         counts.append(count)
 
-    # 2) Compute body numbering (start_body/end_body); absolute pages depend on index length
+    # 2) Compute body numbering (start_body/end_body)
     body_map = []
     cursor = 1
     for (it, _), count in zip(cache, counts):
