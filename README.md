@@ -45,8 +45,8 @@ If you are new to Finland or Turku, you may find this helpful:
 
 ## Master PDF
 - 📘 **[Download Master PDF](pdfs/master.pdf)** (9.5 MB)
-- _Index page is unnumbered; body pages start at 1._
-- _Last updated: 2025-09-07 13:56 UTC_
+- _Index page(s) are unnumbered; body pages start at 1._
+- _Last updated: 2025-09-07 14:04 UTC_
 
 ### Page map (body numbering)
 - **Learning Goals** — pp. 1–1 (open: [p.1](pdfs/master.pdf#page=2))
