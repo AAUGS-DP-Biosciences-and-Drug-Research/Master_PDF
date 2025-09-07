@@ -38,3 +38,20 @@ If you are new to Finland or Turku, you may find this helpful:
 ---
 
 
+
+---
+
+<!-- BEGIN MASTER INDEX -->
+
+## Master PDF
+- 📘 **[Download Master PDF](pdfs/master.pdf)** (9.5 MB)
+- _Built from the sections above, in order. Last updated: 2025-09-07 11:14 UTC_
+
+### Page map
+- **Learning Goals** — pp. 1–1 ([open at p.1](pdfs/master.pdf#page=1))
+- **Curriculum** — pp. 2–2 ([open at p.2](pdfs/master.pdf#page=2))
+- **PhD Follow-up Strategies** — pp. 3–4 ([open at p.3](pdfs/master.pdf#page=3))
+- **Graduation Requirements** — pp. 5–5 ([open at p.5](pdfs/master.pdf#page=5))
+- **Supervisor Portfolio** — pp. 6–35 ([open at p.6](pdfs/master.pdf#page=6))
+
+<!-- END MASTER INDEX -->
