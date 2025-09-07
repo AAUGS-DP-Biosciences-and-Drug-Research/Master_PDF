@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Build master.pdf from README.md with a styled first-page Index:
-- Index page (page 1) styled like your HTML (30px margins, 24/18/12.5 fonts, line-height 1.3, underlined h2).
-- Proper word-wrapping by measured widths; never overflows bottom margin; continues onto extra Index pages if needed.
-- Body: merged PDFs in README order, with bookmarks; body pages numbered 1..N in footers (index pages have no footer numbers).
-- README auto-updated with a page map (links use absolute page numbers that account for multi-page index).
+Master PDF builder with HTML-like index styling:
 
-Dependencies: PyPDF2>=3.0.0, reportlab, requests
+- Index is page 1 (styled like your HTML: 30px margins, 24/18/12.5 fonts, 1.3 line-height, underlined h2)
+- Index entries wrap by measured widths, page number on the LAST line, full-row click area
+- Index can span multiple pages
+- Body = merged PDFs in README order; body pages numbered 1..N (index pages unnumbered)
+- Bookmarks for Index + each section
+- README auto-updated with a page map
+
+Deps: PyPDF2>=3.0.0, reportlab, requests
 """
 
 import io
@@ -17,6 +20,8 @@ from pathlib import Path
 
 import requests
 from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
 from reportlab.lib.colors import black, HexColor
@@ -24,7 +29,6 @@ from reportlab.lib.colors import black, HexColor
 # ---- PyPDF2 (>=3.x) ---------------------------------------------------------
 try:
     from PyPDF2 import PdfReader, PdfWriter
-    # AnnotationBuilder lives under generic in PyPDF2 3.x
     try:
         from PyPDF2.generic import (
             AnnotationBuilder, DictionaryObject, NameObject, ArrayObject,
@@ -45,6 +49,7 @@ README = ROOT / "README.md"
 PDF_DIR = ROOT / "pdfs"
 CACHE = ROOT / ".cache"
 MASTER = PDF_DIR / "master.pdf"
+FONTS_DIR = ROOT / "fonts"  # optional: put Arial.ttf / DejaVuSans.ttf here
 
 BEGIN_MARK = "<!-- BEGIN MASTER INDEX -->"
 END_MARK   = "<!-- END MASTER INDEX -->"
@@ -52,17 +57,41 @@ END_MARK   = "<!-- END MASTER INDEX -->"
 PDF_DIR.mkdir(parents=True, exist_ok=True)
 CACHE.mkdir(parents=True, exist_ok=True)
 
-# CSS-like metrics (converted from px->pt where 1px≈0.75pt)
+# CSS-like metrics (convert px→pt at ~0.75)
 PX = 0.75
-MARGIN_PT = 30 * PX        # ~22.5pt
-TOP_FIRST_PT = 60 * PX     # ~45pt (title page top margin)
-TOP_NEXT_PT  = 30 * PX     # ~22.5pt (subsequent index pages)
+MARGIN_PT = 30 * PX        # ≈22.5pt margins
+TOP_FIRST_PT = 60 * PX     # ≈45pt first page top
+TOP_NEXT_PT  = 30 * PX     # ≈22.5pt subsequent index pages
 BODY_FS = 12.5
 H1_FS = 24
 H2_FS = 18
 LEADING = BODY_FS * 1.3
 LINK_COLOR = HexColor("#0077cc")
 TEXT_COLOR = HexColor("#222222")
+
+# Fonts: we try to register a real sans font; fallback to Helvetica
+FONT_REGULAR = "Helvetica"
+FONT_BOLD = "Helvetica-Bold"
+
+def _register_fonts():
+    global FONT_REGULAR, FONT_BOLD
+    candidates = [
+        ("Arial", "Arial.ttf", "Arial Bold", "Arial-Bold.ttf"),
+        ("DejaVuSans", "DejaVuSans.ttf", "DejaVuSans-Bold", "DejaVuSans-Bold.ttf"),
+        ("LiberationSans", "LiberationSans-Regular.ttf", "LiberationSans-Bold", "LiberationSans-Bold.ttf"),
+    ]
+    for fam, regular, boldfam, bold in candidates:
+        rpath = FONTS_DIR / regular
+        bpath = FONTS_DIR / bold
+        if rpath.exists() and bpath.exists():
+            try:
+                pdfmetrics.registerFont(TTFont(fam, str(rpath)))
+                pdfmetrics.registerFont(TTFont(boldfam, str(bpath)))
+                FONT_REGULAR, FONT_BOLD = fam, boldfam
+                return
+            except Exception:
+                continue
+_register_fonts()
 
 # ----------------------------- helpers ---------------------------------------
 def human_size(n: int) -> str:
@@ -86,8 +115,10 @@ def write_file(p: Path, s: str) -> None:
     p.write_text(s, encoding="utf-8")
 
 def wrap_by_width(c: canvas.Canvas, text: str, font: str, size: float, max_width: float):
-    """Word-wrap by measured widths; returns list[str] lines."""
+    """Word-wrap by measured widths; returns list[str] lines (never empty for non-empty text)."""
     words = text.split()
+    if not words:
+        return [""]
     lines, line = [], ""
     for w in words:
         test = (line + " " + w).strip()
@@ -96,7 +127,7 @@ def wrap_by_width(c: canvas.Canvas, text: str, font: str, size: float, max_width
         else:
             if line:
                 lines.append(line)
-            # very long single token: hard-break by chars
+            # very long token: hard-break
             if c.stringWidth(w, font, size) > max_width:
                 buf = ""
                 for ch in w:
@@ -201,10 +232,10 @@ def download_pdf(url: str, dest: Path) -> None:
                     f.write(chunk)
 
 def page_number_overlay(width: float, height: float, text: str):
-    """Footer page number for body pages (right, within margin)."""
+    """Footer number for body pages (aligned with 30px margin)."""
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(width, height))
-    c.setFont("Helvetica", 9)
+    c.setFont(FONT_REGULAR, 9)
     c.setFillColor(black)
     c.drawRightString(width - MARGIN_PT, MARGIN_PT - 4, text)
     c.save()
@@ -263,69 +294,70 @@ def add_internal_link(writer: PdfWriter, from_page: int, to_page: int, rect):
     except Exception:
         pass
 
-# ----------------------------- styled Index (multi-page) ---------------------
-def make_styled_index_pdf(cover: dict, toc_entries, pagesize=A4):
+# ----------------------------- styled Index (multi-page, safe wrapping) -----
+def draw_h2(c, W, y, text):
+    c.setFont(FONT_BOLD, H2_FS)
+    c.drawString(MARGIN_PT, y, text)
+    y -= 6
+    c.setLineWidth(1)
+    c.setStrokeColor(HexColor("#cccccc"))
+    c.line(MARGIN_PT, y, W - MARGIN_PT, y)
+    return y - 10
+
+def make_index_pages(cover: dict, body_entries, pagesize=A4):
     """
-    Create the Index PDF. Returns (PdfReader, link_rects) where link_rects is a
-    list of (from_page_idx, rect, body_start_page).
+    Create the Index PDF. Returns (PdfReader, link_rects)
+    where link_rects: list of (from_page_idx, rect, target_abs_page_idx_later)
+    We don't know absolute body page indices yet; we'll store body_start and map later.
     """
     packet = io.BytesIO()
     c = canvas.Canvas(packet, pagesize=pagesize)
     W, H = pagesize
+    max_w = W - 2 * MARGIN_PT
 
     def new_page(first=False):
-        c.setFillColor(TEXT_COLOR)
-        return (H - (TOP_FIRST_PT if first else TOP_NEXT_PT))
+        return H - (TOP_FIRST_PT if first else TOP_NEXT_PT)
 
-    def ensure_space(y, needed, page_index):
+    def ensure_space(y, needed):
         if y - needed < MARGIN_PT:
             c.showPage()
-            return (new_page(first=False), page_index + 1)
-        return (y, page_index)
+            return new_page(first=False)
+        return y
 
-    y = new_page(first=True)
+    link_rects = []  # (page_idx, rect, body_start)
     page_idx = 0
-    link_rects = []
+    y = new_page(first=True)
 
-    # Title centered (page 1 only)
-    c.setFont("Helvetica-Bold", H1_FS)
+    # Title (centered)
+    c.setFillColor(TEXT_COLOR)
+    c.setFont(FONT_BOLD, H1_FS)
     title = cover.get("title", "Programme")
-    tw = c.stringWidth(title, "Helvetica-Bold", H1_FS)
+    tw = c.stringWidth(title, FONT_BOLD, H1_FS)
     c.drawString((W - tw) / 2.0, y, title)
     y -= 20
 
-    # Intro paragraphs
-    c.setFont("Helvetica", BODY_FS)
-    max_w = W - 2 * MARGIN_PT
+    # Intro
+    c.setFont(FONT_REGULAR, BODY_FS)
     for para in (cover.get("intro") or []):
-        lines = wrap_by_width(c, para, "Helvetica", BODY_FS, max_w)
+        lines = wrap_by_width(c, para, FONT_REGULAR, BODY_FS, max_w)
         for line in lines:
-            y, page_idx = ensure_space(y, LEADING, page_idx)
+            y = ensure_space(y, LEADING)
             c.drawString(MARGIN_PT, y, line)
             y -= LEADING
-        y -= 4  # small spacing between paragraphs
+        y -= 4
 
-    # Major Subjects block
+    # Majors
     majors = cover.get("majors") or []
     if majors:
-        # h2
-        y, page_idx = ensure_space(y, H2_FS + 16, page_idx)
-        c.setFont("Helvetica-Bold", H2_FS)
-        c.drawString(MARGIN_PT, y, "Major Subjects in the Programme")
-        y -= 6
-        c.setLineWidth(1)
-        c.setStrokeColor(HexColor("#cccccc"))
-        c.line(MARGIN_PT, y, W - MARGIN_PT, y)
-        y -= 10
-        # list
-        c.setFont("Helvetica", BODY_FS)
+        y = ensure_space(y, H2_FS + 16)
+        y = draw_h2(c, W, y, "Major Subjects in the Programme")
+        c.setFont(FONT_REGULAR, BODY_FS)
         for m in majors:
-            # bullet + wrapped text with hanging indent
             prefix = "• "
-            indent = c.stringWidth(prefix, "Helvetica", BODY_FS)
-            lines = wrap_by_width(c, m, "Helvetica", BODY_FS, max_w - indent)
+            indent = c.stringWidth(prefix, FONT_REGULAR, BODY_FS)
+            lines = wrap_by_width(c, m, FONT_REGULAR, BODY_FS, max_w - indent)
             for i, line in enumerate(lines):
-                y, page_idx = ensure_space(y, LEADING, page_idx)
+                y = ensure_space(y, LEADING)
                 if i == 0:
                     c.drawString(MARGIN_PT, y, prefix + line)
                 else:
@@ -336,56 +368,58 @@ def make_styled_index_pdf(cover: dict, toc_entries, pagesize=A4):
     surv = cover.get("survival")
     if surv:
         label = f"Helpful: {surv['text']}"
-        label_w = c.stringWidth(label, "Helvetica", BODY_FS)
-        y, page_idx = ensure_space(y, LEADING, page_idx)
-        c.setFont("Helvetica", BODY_FS)
+        label_w = c.stringWidth(label, FONT_REGULAR, BODY_FS)
+        y = ensure_space(y, LEADING)
+        c.setFont(FONT_REGULAR, BODY_FS)
         c.setFillColor(LINK_COLOR)
         c.drawString(MARGIN_PT, y, label)
         c.linkURL(surv["url"], (MARGIN_PT, y - 2, MARGIN_PT + label_w, y + 12), relative=0)
         c.setFillColor(TEXT_COLOR)
         y -= LEADING
 
-    # Index header (h2)
-    y, page_idx = ensure_space(y, H2_FS + 16, page_idx)
-    c.setFont("Helvetica-Bold", H2_FS)
-    c.drawString(MARGIN_PT, y, "Index")
-    y -= 6
-    c.setLineWidth(1)
-    c.setStrokeColor(HexColor("#cccccc"))
-    c.line(MARGIN_PT, y, W - MARGIN_PT, y)
-    y -= 10
-    c.setFont("Helvetica", BODY_FS)
+    # Index header
+    y = ensure_space(y, H2_FS + 16)
+    y = draw_h2(c, W, y, "Index")
+    c.setFont(FONT_REGULAR, BODY_FS)
 
-    # Entries
-    for title, body_start in toc_entries:
-        # Wrap title if too long (single visual line preferred)
-        line = title
-        # draw row
-        y, page_idx = ensure_space(y, LEADING, page_idx)
-        # Title left
-        c.setFont("Helvetica", BODY_FS)
-        # reserve room for page number at right
-        c.drawString(MARGIN_PT, y, line)
-        # Page number right
-        c.drawRightString(W - MARGIN_PT, y, f"{body_start}")
-        # clickable across the whole row
-        rect = (MARGIN_PT, y - 2, W - MARGIN_PT, y + 12)
+    # Entries: wrap by width, page # on last line, link covers all lines
+    for title, body_start in body_entries:
+        lines = wrap_by_width(c, title, FONT_REGULAR, BODY_FS, max_w - 48)  # leave room for page number box
+        rect_top = y
+        for i, line in enumerate(lines):
+            y = ensure_space(y, LEADING)
+            c.drawString(MARGIN_PT, y, line)
+            if i == len(lines) - 1:
+                # only on last line show the page number right-aligned
+                c.drawRightString(W - MARGIN_PT, y, f"{body_start}")
+            y -= LEADING
+        rect_bottom = y + LEADING  # top of last drawn line
+        rect = (MARGIN_PT, rect_bottom - 2, W - MARGIN_PT, rect_top + 12)
         link_rects.append((page_idx, rect, body_start))
-        y -= LEADING
+        if y - LEADING < MARGIN_PT:
+            c.showPage()
+            page_idx += 1
+            y = new_page(first=False)
+            c.setFont(FONT_REGULAR, BODY_FS)
 
-    # Footer (each index page)
-    # We’ll add a small footer text on each index page after building all pages:
-    # (Cannot iterate pages directly here because we’re streaming)
+    # Footer (optional tiny generator note on each index page)
+    # Skipped: margins already tight, and we aim to match your HTML look.
 
-    # Finish
     c.showPage()
     c.save()
     packet.seek(0)
     index_reader = PdfReader(packet)
-
-    # Add "Generated from README.md" footer to each index page via a light overlay
-    # (keep style consistent; not strictly necessary if you prefer to omit)
-    # Skipped for simplicity since content is already bounded; can be added similarly to page numbers.
+    # Adjust page_idx count (last showPage created an extra blank page):
+    # Remove trailing blank if exists
+    if len(index_reader.pages) > (page_idx + 1):
+        # remove last blank
+        writer_tmp = PdfWriter()
+        for i in range(page_idx + 1):  # keep only filled pages
+            writer_tmp.add_page(index_reader.pages[i])
+        buf2 = io.BytesIO()
+        writer_tmp.write(buf2)
+        buf2.seek(0)
+        index_reader = PdfReader(buf2)
 
     return index_reader, link_rects
 
@@ -411,12 +445,15 @@ def build_master(cover: dict, items: list[dict]):
         body_map.append({"title": it["title"], "start_body": cursor, "end_body": cursor + count - 1})
         cursor += count
 
-    # 3) Build Index PDF (may be multi-page). It only needs (title, start_body).
-    toc_entries = [(ent["title"], ent["start_body"]) for ent in body_map]
-    index_pdf, link_rects = make_styled_index_pdf(cover, toc_entries, pagesize=A4)
+    # 3) Build Index PDF (may be multi-page)
+    index_pdf, link_rects = make_index_pages(
+        cover,
+        [(ent["title"], ent["start_body"]) for ent in body_map],
+        pagesize=A4,
+    )
     index_pages = len(index_pdf.pages)
 
-    # 4) Now compute absolute pages
+    # 4) Compute absolute pages now that we know index length
     page_map = []
     for ent, count in zip(body_map, counts):
         start_abs = index_pages + ent["start_body"]
@@ -427,15 +464,15 @@ def build_master(cover: dict, items: list[dict]):
             "start_abs": start_abs, "end_abs": end_abs,
         })
 
-    # 5) Assemble final PDF
+    # 5) Assemble
     writer = PdfWriter()
 
-    # Add all index pages
+    # Add index pages
     for p in index_pdf.pages:
         writer.add_page(p)
     add_bookmark(writer, "Index", 0)
 
-    # Body with bookmarks + footer numbers
+    # Body + bookmarks + footer numbers
     sections_parent = add_bookmark(writer, "Sections", index_pages)
     abs_page_index = index_pages  # zero-based index where body starts
 
@@ -453,9 +490,9 @@ def build_master(cover: dict, items: list[dict]):
             abs_page_index += 1
             num += 1
 
-    # 6) Wire up clickable index links
+    # 6) Wire clickable index links (map body_start -> absolute)
     for from_page, rect, body_start in link_rects:
-        target_idx = index_pages + (body_start - 1)  # zero-based writer index
+        target_idx = index_pages + (body_start - 1)  # zero-based
         add_internal_link(writer, from_page, target_idx, rect)
 
     # 7) Write
