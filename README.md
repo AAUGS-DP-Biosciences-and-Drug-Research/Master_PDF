@@ -1,17 +1,8 @@
 # Doctoral Programme in Biosciences and Drug Research
 
-Welcome to the Doctoral Programme in Biosciences and Drug Research at **Åbo Akademi University**.
----
+### Welcome to the Doctoral Programme in Biosciences and Drug Research at **Åbo Akademi University**.
 
-## Major Subjects in the Programme
-
-- Biochemistry  
-- Cell Biology  
-- Environmental and Marine Biology  
-- Drug Development  
-- Pharmacy
-
----
+This document contains some useful information about our doctoral program.
 
 If you are new to Finland or Turku, you may find this helpful:  
 📘 [ÅAU Survival Guide (2023–2024, PDF)](https://www.abo.fi/wp-content/uploads/2024/05/survival_guide_2023-2024.pdf)
@@ -33,9 +24,6 @@ If you are new to Finland or Turku, you may find this helpful:
 
 ### Supervisor Portfolio  
 - 📄 [Download PDF](https://aaugs-dp-biosciences-and-drug-research.github.io/supervisor-portfolio/Supervisor_Portfolio.pdf)
-
-
----
 
 
 
