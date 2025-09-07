@@ -27,7 +27,18 @@ jobs:
 
       - name: Build master PDF from README
         run: |
+          set -e
           python scripts/build_from_readme.py
+
+      # 🔽 NEW: clean caches/artifacts only if the build succeeded
+      - name: Clean builder cache (after successful build)
+        if: ${{ success() }}
+        run: |
+          echo "Removing cached sources and temp files…"
+          rm -rf .cache || true
+          # Safety: remove stray tmp files that some PDF tools leave behind
+          find pdfs -maxdepth 1 -type f -name '*.tmp' -delete || true
+          find .    -maxdepth 2 -type f -name '*.tmp' -delete || true
 
       - name: Commit master.pdf and updated README
         run: |
