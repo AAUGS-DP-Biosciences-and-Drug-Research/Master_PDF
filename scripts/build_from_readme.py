@@ -6,7 +6,7 @@ Build a polished master.pdf from README.md:
 - Merged body with bookmarks & page numbers (starting at 1 on the body)
 - README auto-updated with a "Master PDF" section + page map
 
-Compatible with PyPDF2 >= 3 (preferred) and falls back to pypdf.
+Uses PyPDF2 >= 3.x only (no pypdf required).
 """
 
 import io
@@ -17,18 +17,24 @@ import datetime
 import textwrap
 from pathlib import Path
 
-# Prefer PyPDF2 (has AnnotationBuilder.add_annotation API). Fallback to pypdf.
+# ---- PyPDF2 imports (>=3.x) -------------------------------------------------
 try:
-    from PyPDF2 import PdfReader, PdfWriter, AnnotationBuilder
-    PYPDF_BACKEND = "PyPDF2"
-except Exception:
-    from pypdf import PdfReader, PdfWriter
+    from PyPDF2 import PdfReader, PdfWriter
+    # AnnotationBuilder lives under generic in PyPDF2 3.x
     try:
-        # pypdf 4+ provides AnnotationBuilder under pypdf.annotations
-        from pypdf.annotations import AnnotationBuilder  # type: ignore
+        from PyPDF2.generic import (
+            AnnotationBuilder, DictionaryObject, NameObject, ArrayObject,
+            FloatObject, NumberObject
+        )
     except Exception:
-        AnnotationBuilder = None  # we will fallback to manual annotations if needed
-    PYPDF_BACKEND = "pypdf"
+        # Some builds expose AnnotationBuilder via PyPDF2.annotations
+        AnnotationBuilder = None
+        from PyPDF2.generic import (
+            DictionaryObject, NameObject, ArrayObject, FloatObject, NumberObject
+        )
+except Exception as e:
+    print("PyPDF2 (>=3) is required. Install with: pip install 'PyPDF2>=3.0.0'", file=sys.stderr)
+    raise
 
 import requests
 from reportlab.pdfgen import canvas
@@ -46,7 +52,6 @@ END_MARK   = "<!-- END MASTER INDEX -->"
 
 PDF_DIR.mkdir(parents=True, exist_ok=True)
 CACHE.mkdir(parents=True, exist_ok=True)
-
 
 # ----------------------------- utilities -----------------------------
 
@@ -70,7 +75,6 @@ def read_file(p: Path) -> str:
 
 def write_file(p: Path, s: str) -> None:
     p.write_text(s, encoding="utf-8")
-
 
 # ----------------------------- README parsing -----------------------------
 
@@ -162,7 +166,6 @@ def parse_readme(md: str):
     }
     return cover, items
 
-
 # ----------------------------- PDF primitives -----------------------------
 
 def download_pdf(url: str, dest: Path) -> None:
@@ -233,7 +236,7 @@ def make_contents_pdf(entries, pagesize=A4):
     """
     Build a 1-page "Contents" PDF.
     entries: list of tuples (title, body_start_page_num, absolute_start_index)
-    Returns: (PdfReader, link_rects) where link_rects = [(rect, abs_target_index), ...]
+    Returns: (PdfReader, link_rects) where link_rects = [(rect, target_page_index), ...]
     """
     packet = io.BytesIO()
     c = canvas.Canvas(packet, pagesize=pagesize)
@@ -272,57 +275,40 @@ def page_number_overlay(width: float, height: float, text: str):
     buf.seek(0)
     return PdfReader(buf).pages[0]
 
-
 # ----------------------------- writer helpers -----------------------------
 
 def add_bookmark(writer: PdfWriter, title: str, page_index: int, parent=None):
-    """
-    Add an outline/bookmark. Handles PyPDF2 (add_outline_item/addBookmark) and pypdf.
-    """
+    """Add an outline/bookmark (PyPDF2 3.x uses add_outline_item)."""
     if hasattr(writer, "add_outline_item"):
         return writer.add_outline_item(title, page_index, parent=parent)
-    if hasattr(writer, "addBookmark"):
+    if hasattr(writer, "addBookmark"):  # older PyPDF2 (<3)
         return writer.addBookmark(title, page_index, parent)
     return None
 
 def add_internal_link(writer: PdfWriter, from_page: int, to_page: int, rect):
     """
     Create a clickable link on page `from_page` that jumps to `to_page`.
-    Uses modern AnnotationBuilder when available, otherwise tries older APIs,
-    else falls back to a low-level annotation for pypdf/PyPDF2.
+    Preferred: AnnotationBuilder + writer.add_annotation (PyPDF2 >=3).
+    Fallback: low-level annotation.
     """
-    # Preferred modern API
     if AnnotationBuilder is not None and hasattr(writer, "add_annotation"):
         try:
             annot = AnnotationBuilder.link(rect=rect, target_page_index=to_page)
             writer.add_annotation(page_number=from_page, annotation=annot)
             return
         except Exception:
-            pass
+            pass  # fall through to low-level
 
-    # Legacy PyPDF2 < 3.0:
-    if hasattr(writer, "addLink"):
-        try:
-            writer.addLink(from_page, to_page, rect)
-            return
-        except Exception:
-            pass
-
-    # Low-level fallback (last resort)
+    # Low-level fallback annotation (/Link with /Dest)
     try:
-        # Try PyPDF2 generics, then pypdf generics
-        try:
-            from PyPDF2.generic import (
-                DictionaryObject, NameObject, ArrayObject, FloatObject, NumberObject
-            )
-        except Exception:
-            from pypdf.generic import (  # type: ignore
-                DictionaryObject, NameObject, ArrayObject, FloatObject, NumberObject
-            )
         page = writer.pages[from_page]
         dest_page = writer.pages[to_page]
-        dest = ArrayObject([dest_page.indirect_reference, NameObject("/Fit")])
+        # Some builds expose .indirect_reference; if not, give up quietly
+        page_ref = getattr(dest_page, "indirect_reference", None)
+        if page_ref is None:
+            return
 
+        dest = ArrayObject([page_ref, NameObject("/Fit")])
         annot = DictionaryObject()
         annot.update({
             NameObject("/Type"): NameObject("/Annot"),
@@ -344,18 +330,14 @@ def add_internal_link(writer: PdfWriter, from_page: int, to_page: int, rect):
         pass
 
 def merge_page_safe(page_obj, overlay_page_obj):
-    """
-    Merge overlay_page_obj onto page_obj across PyPDF2/pypdf versions.
-    """
+    """Merge overlay_page_obj onto page_obj across PyPDF2 versions."""
     try:
         page_obj.merge_page(overlay_page_obj)  # modern
     except Exception:
         try:
             page_obj.mergePage(overlay_page_obj)  # legacy
         except Exception:
-            # Some pages (e.g., image-only) can misbehave; ignore numbering if it fails
             pass
-
 
 # ----------------------------- assembly -----------------------------
 
@@ -432,7 +414,7 @@ def build_master(cover: dict, items: list[dict]):
             abs_page_index += 1
             body_page_num += 1
 
-    # 4) Make ToC entries clickable (best effort across libs)
+    # 4) Make ToC entries clickable (best effort)
     toc_index = 1  # Contents page is second page (zero-based index 1)
     for rect, target_index in toc_link_rects:
         add_internal_link(writer, toc_index, target_index, rect)
@@ -443,7 +425,6 @@ def build_master(cover: dict, items: list[dict]):
         writer.write(f)
 
     return page_map
-
 
 # ----------------------------- README update -----------------------------
 
@@ -485,7 +466,6 @@ def update_readme(md: str, page_map: list[dict]) -> str:
         new_md = md + sep + block + "\n"
     return new_md
 
-
 # ----------------------------- main -----------------------------
 
 def main():
@@ -504,7 +484,6 @@ def main():
     new_md = update_readme(md, page_map)
     if new_md != md:
         write_file(README, new_md)
-
 
 if __name__ == "__main__":
     main()
