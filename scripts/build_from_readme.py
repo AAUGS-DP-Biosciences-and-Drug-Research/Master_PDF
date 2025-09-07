@@ -2,16 +2,14 @@
 """
 Build master.pdf from README.md with a styled first-page Index:
 
-- Index page (page 1) styled like your HTML:
-  * 30px margins, Arial/Helvetica-like sizing: 24 (H1), 18 (H2), 12.5 (body)
-  * line-height ~1.3, underlined H2s
-  * H1 wraps INSIDE the content box and is centered line-by-line
-  * extra spacing under the title and before the "Index" header
-- Index entries wrap, page number is on the LAST line, full entry row is clickable
-- Index can span multiple pages (entries never split across pages)
-- Body: merged PDFs in README order; body pages numbered 1..N (index pages unnumbered)
-- Bookmarks for Index + each section
-- README auto-updated with a page map
+- First page strictly uses a 30px content box (no left/right bleed).
+- Smaller fonts (H1=18, H2=14, body=11), extra vertical spacing.
+- H1 (and H3 subheads) wrap and are centered within the content box.
+- Intro paragraphs left-aligned for readability; index header and entries comply with margins.
+- Index entries wrap, never split across pages; page number on last line; full entry is clickable.
+- Body PDFs merged afterward; body pages numbered 1..N (index pages unnumbered).
+- Bookmarks for Index and each section.
+- README updated with a page map.
 
 Deps: PyPDF2>=3.0.0, reportlab, requests
 """
@@ -62,16 +60,16 @@ CACHE.mkdir(parents=True, exist_ok=True)
 
 # CSS-like metrics (convert px→pt at ~0.75)
 PX = 0.75
-MARGIN_PT = 30 * PX        # ≈22.5pt margins
-TOP_FIRST_PT = 60 * PX     # ≈45pt top margin on first index page
-TOP_NEXT_PT  = 30 * PX     # ≈22.5pt on subsequent index pages
-BODY_FS = 12.5
-H1_FS = 24
-H2_FS = 18
-LEADING = BODY_FS * 1.3
-H1_LEADING = H1_FS * 1.2
-TITLE_MB_PT = 40 * PX      # ≈30pt space under title
-INDEX_TOP_EXTRA_PT = 16 * PX
+MARGIN_PT = 30 * PX        # ≈22.5pt margins (matches your HTML)
+TOP_FIRST_PT = 84 * PX     # ≈63pt top margin on first index page (more space)
+TOP_NEXT_PT  = 40 * PX     # ≈30pt top margin on subsequent index pages
+BODY_FS = 11.0
+H1_FS = 18.0
+H2_FS = 14.0
+LEADING = BODY_FS * 1.45   # looser line height for more space
+H1_LEADING = H1_FS * 1.3
+TITLE_MB_PT = 56 * PX      # ≈42pt space under title
+INDEX_TOP_EXTRA_PT = 28 * PX
 LINK_COLOR = HexColor("#0077cc")
 TEXT_COLOR = HexColor("#222222")
 
@@ -156,10 +154,10 @@ def parse_readme(md: str):
       cover: {
         'title': H1,
         'subheads': [h3 text inside the intro block],
-        'intro': [paragraph lines in intro block],
+        'intro': [paragraphs inside intro block],
         'survival': {'text','url'} | None
       }
-      items: [{'title','url'}] (in the same order as README)
+      items: [{'title','url'}] (in README order)
     The "intro block" is everything from the start until the first '---' line.
     """
     lines = md.splitlines()
@@ -174,10 +172,10 @@ def parse_readme(md: str):
 
     # Intro block: from start until first horizontal rule '---'
     intro_block = []
-    hr_found = False
-    for ln in lines:
+    hr_pos = None
+    for i, ln in enumerate(lines):
         if ln.strip().startswith('---'):
-            hr_found = True
+            hr_pos = i
             break
         intro_block.append(ln)
 
@@ -189,22 +187,17 @@ def parse_readme(md: str):
         if h3:
             subheads.append(strip_md_inline(h3.group(1).strip()))
             continue
-        # ignore H1 itself
         if re.match(r"^\s*#\s+", ln):
             continue
-        # ignore empty lines and bullet-only top lists (not used in your README now)
         if ln.strip().startswith(("-", "*")):
             continue
         if ln.strip() == "":
             intro_paras.append("")  # preserve paragraph breaks
         else:
-            # keep original lines; we'll wrap later
             intro_paras.append(strip_md_inline(ln))
 
-    # Collapse multiple empties but keep paragraph separation
-    # (simple normalize: split on blanks to paras)
-    paras = []
-    buf = []
+    # Normalize paragraphs (collapse multiple blanks)
+    paras, buf = [], []
     for ln in intro_paras:
         if ln == "":
             if buf:
@@ -215,7 +208,7 @@ def parse_readme(md: str):
     if buf:
         paras.append(" ".join(buf).strip())
 
-    # Survival guide: first PDF link anywhere in the intro block
+    # Survival guide: first PDF link in the intro block
     survival = None
     for ln in intro_block:
         m = re.search(r"\[([^\]]+)\]\((https?://[^\s)]+\.pdf)\)", ln, re.I)
@@ -223,21 +216,15 @@ def parse_readme(md: str):
             survival = {"text": strip_md_inline(m.group(1)), "url": m.group(2)}
             break
 
-    # Section items AFTER the first '---'
+    # Section items after the first '---'
     items = []
-    if hr_found:
-        after = lines[lines.index('---')+1 if '---' in lines else len(lines):]
-    else:
-        after = lines
-
+    after = lines[(hr_pos + 1) if hr_pos is not None else 0:]
     current_h3 = None
     for ln in after:
-        # new section header
         h = re.match(r"^\s*###\s+(.*)\s*$", ln)
         if h:
             current_h3 = strip_md_inline(h.group(1).strip())
             continue
-        # download link
         m = re.search(r"\[.*?Download PDF.*?\]\((https?://[^)]+?\.pdf)\)", ln, re.I)
         if m and current_h3:
             items.append({"title": current_h3, "url": m.group(1).strip()})
@@ -245,7 +232,7 @@ def parse_readme(md: str):
     cover = {
         "title": title or "Programme",
         "subheads": subheads,   # e.g., ["Welcome to the Doctoral Programme in ..."]
-        "intro": paras,         # the paragraph text (wrapped later)
+        "intro": paras,         # the paragraph text
         "survival": survival,
     }
     return cover, items
@@ -325,9 +312,15 @@ def add_internal_link(writer: PdfWriter, from_page: int, to_page: int, rect):
         pass
 
 # ----------------------------- styled Index (multi-page, safe) ---------------
-def draw_h2_with_rule(c, W, y, text):
+def draw_h2_with_rule(c, W, y, text, center=False):
     c.setFont(FONT_BOLD, H2_FS)
-    c.drawString(MARGIN_PT, y, text)
+    content_w = W - 2 * MARGIN_PT
+    if center:
+        lw = c.stringWidth(text, FONT_BOLD, H2_FS)
+        x = MARGIN_PT + max(0, (content_w - lw) / 2.0)
+    else:
+        x = MARGIN_PT
+    c.drawString(x, y, text)
     y -= 6
     c.setLineWidth(1)
     c.setStrokeColor(HexColor("#cccccc"))
@@ -369,18 +362,27 @@ def make_index_pages(cover: dict, body_entries, pagesize=A4):
     y = ensure_space(y, H1_LEADING * len(title_lines) + TITLE_MB_PT)
     for line in title_lines:
         lw = c.stringWidth(line, FONT_BOLD, H1_FS)
-        x = MARGIN_PT + (content_w - lw) / 2.0
+        x = MARGIN_PT + max(0, (content_w - lw) / 2.0)
         c.drawString(x, y, line)
         y -= H1_LEADING
     y -= TITLE_MB_PT  # breathing room under title
 
-    # ----- OPTIONAL H3 SUBHEADS (rendered as H2 style) -----
+    # ----- H3 SUBHEADS (centered, styled like subheading) -----
     subheads = cover.get("subheads") or []
     for sh in subheads:
-        y = ensure_space(y, H2_FS + 16)
-        y = draw_h2_with_rule(c, W, y, sh)
+        # wrap subhead and center each line
+        c.setFont(FONT_BOLD, H2_FS)  # slightly smaller than title
+        sub_lines = wrap_by_width(c, sh, FONT_BOLD, H2_FS, max_w)
+        needed = (H2_FS * 1.2) * len(sub_lines) + 8
+        y = ensure_space(y, needed)
+        for line in sub_lines:
+            lw = c.stringWidth(line, FONT_BOLD, H2_FS)
+            x = MARGIN_PT + max(0, (content_w - lw) / 2.0)
+            c.drawString(x, y, line)
+            y -= (H2_FS * 1.2)
+        y -= 6  # small gap after subhead
 
-    # ----- INTRO PARAGRAPHS -----
+    # ----- INTRO PARAGRAPHS (left-aligned, wrapped to content width) -----
     c.setFont(FONT_REGULAR, BODY_FS)
     for para in (cover.get("intro") or []):
         if not para:
@@ -390,7 +392,7 @@ def make_index_pages(cover: dict, body_entries, pagesize=A4):
             y = ensure_space(y, LEADING)
             c.drawString(MARGIN_PT, y, line)
             y -= LEADING
-        y -= 4
+        y -= 6  # more spacing between paragraphs
 
     # ----- SURVIVAL GUIDE LINK -----
     surv = cover.get("survival")
@@ -404,22 +406,23 @@ def make_index_pages(cover: dict, body_entries, pagesize=A4):
         c.linkURL(surv["url"], (MARGIN_PT, y - 2, MARGIN_PT + lw, y + 12), relative=0)
         c.setFillColor(TEXT_COLOR)
         y -= LEADING
+        y -= 6
 
     # ----- EXTRA GAP BEFORE INDEX HEADER -----
     y = ensure_space(y, INDEX_TOP_EXTRA_PT)
     y -= INDEX_TOP_EXTRA_PT
 
-    # ----- INDEX HEADER -----
+    # ----- INDEX HEADER (left-aligned; keeps margins) -----
     y = ensure_space(y, H2_FS + 16)
-    y = draw_h2_with_rule(c, W, y, "Index")
+    y = draw_h2_with_rule(c, W, y, "Index", center=False)
     c.setFont(FONT_REGULAR, BODY_FS)
 
     # ----- INDEX ENTRIES (never split an entry across pages) -----
     for title, body_start in body_entries:
-        text_w = max_w - 48  # reserve right edge for page number
+        text_w = max_w - 56  # reserve right edge for page number
         lines = wrap_by_width(c, title, FONT_REGULAR, BODY_FS, text_w)
         required = LEADING * len(lines)
-        # move to next page if this entry doesn't fit here
+        # move entry to next page if it won't fit
         if y - required < MARGIN_PT:
             c.showPage()
             current_page += 1
@@ -431,11 +434,13 @@ def make_index_pages(cover: dict, body_entries, pagesize=A4):
             if i == len(lines) - 1:
                 c.drawRightString(W - MARGIN_PT, y, f"{body_start}")
             y -= LEADING
+        # click area covers the wrapped block
         rect_bottom = y + LEADING
         rect = (MARGIN_PT, rect_bottom - 2, W - MARGIN_PT, rect_top + 12)
         link_rects.append((current_page, rect, body_start))
+        y -= 4  # small gap between entries
 
-    # finalize (do NOT add an extra blank page)
+    # finalize (no blank last page)
     c.save()
     packet.seek(0)
     index_reader = PdfReader(packet)
